@@ -159,19 +159,28 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         "session_key": session_key, "surface": surface,
     }
     keys = list(approval_data.get("pattern_keys") or [])
+    entry = _ApprovalEntry(approval_data)
+
+    def _enqueue() -> None:
+        register_prepared_approval(session_key, entry)
+        _approval._gateway_queues.setdefault(session_key, []).append(entry)
+
+    # The leader lookup and our enqueue are ONE critical section: split, two identical requests both
+    # miss each other, both enqueue and the user gets duplicate prompts.
     with _approval._lock:
-        leader = next((e for e in _approval._gateway_queues.get(session_key, [])
-                       if e.data.get("command") == approval_data.get("command")
-                       and list(e.data.get("pattern_keys") or []) == keys), None)
-    if leader is not None and not preparing_terminal_approval():
+        leader = None
+        if not preparing_terminal_approval():
+            leader = next((e for e in _approval._gateway_queues.get(session_key, [])
+                           if e.data.get("command") == approval_data.get("command")
+                           and list(e.data.get("pattern_keys") or []) == keys), None)
+        if leader is None:
+            _enqueue()
+    if leader is not None:
         adopted = _await_coalesced_leader(session_key, leader, payload)
         if adopted is not None:
             return adopted
-
-    entry = _ApprovalEntry(approval_data)
-    with _approval._lock:
-        register_prepared_approval(session_key, entry)
-        _approval._gateway_queues.setdefault(session_key, []).append(entry)
+        with _approval._lock:
+            _enqueue()
 
     def _drop_entry(state: str) -> str | None:
         """Leave the queue and return the choice committed so far. Reading ``entry.result`` and
