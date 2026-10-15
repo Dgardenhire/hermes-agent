@@ -204,7 +204,7 @@ class FileSyncManager:
         self._bulk_download_fn = bulk_download_fn
         self._delete_fn = delete_fn
         self._transaction_lock = threading.Lock()
-        self._synced_files: dict[str, tuple[float, int]] = {}  # remote_path -> (mtime, size)
+        self._synced_files: dict[str, tuple[int, int, int, int]] = {}  # remote_path -> file_signature
         self._pushed_hashes: dict[str, str] = {}  # remote_path -> sha256 hex digest
         self._upload_only_host_paths: set[str] = set()
         self._last_sync_time: float = 0.0  # monotonic; 0 ensures first sync runs
@@ -264,7 +264,7 @@ class FileSyncManager:
 
     def _plan_sync(
         self, current_files: list[tuple[str, str]]
-    ) -> tuple[list[tuple[str, str]], dict[str, tuple[float, int]], list[str]]:
+    ) -> tuple[list[tuple[str, str]], dict[str, tuple[int, int, int, int]], list[str]]:
         """Diff *current_files* against synced state -> ``(to_upload, new_synced_state, to_delete)``."""
         to_upload: list[tuple[str, str]] = []
         new_files = dict(self._synced_files)

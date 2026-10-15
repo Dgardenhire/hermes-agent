@@ -55,6 +55,35 @@ class TestMtimeSkip:
         mgr.sync(force=True)
         assert upload.call_count == 0, "unchanged files should not be re-uploaded"
 
+    @pytest.mark.platforms("linux", "macos")
+    def test_same_size_same_mtime_replace_is_re_uploaded(self, tmp_path):
+        """An OAuth refresh atomically replaces a token with same-size bytes inside the mtime
+        tick of the last sync; the remote must still receive the new credential."""
+        token = tmp_path / "token.json"
+        pinned_ns = 1_800_000_000_000_000_000
+        token.write_text('{"access":"AAAA"}', encoding="utf-8")
+        os.utime(token, ns=(pinned_ns, pinned_ns))
+        uploaded = []
+
+        def bulk_upload(files):
+            uploaded.extend(Path(staged).read_text(encoding="utf-8") for staged, _remote in files)
+
+        mgr = FileSyncManager(
+            get_files_fn=lambda: [(str(token), "/root/.hermes/token.json")],
+            upload_fn=MagicMock(),
+            delete_fn=MagicMock(),
+            bulk_upload_fn=bulk_upload,
+        )
+        mgr.sync(force=True)
+
+        replacement = tmp_path / "token.json.tmp"
+        replacement.write_text('{"access":"BBBB"}', encoding="utf-8")
+        os.utime(replacement, ns=(pinned_ns, pinned_ns))
+        os.replace(replacement, token)
+        mgr.sync(force=True)
+
+        assert uploaded == ['{"access":"AAAA"}', '{"access":"BBBB"}']
+
 
     def test_new_file_detected(self, tmp_files, tmp_path):
         upload = MagicMock()
