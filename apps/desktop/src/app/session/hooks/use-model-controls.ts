@@ -43,6 +43,11 @@ interface ModelSwitchResponse {
   deferred?: boolean
 }
 
+// Newest picker selection per live session, shared by every surface that
+// mounts this hook: only the newest pick's failure may roll the session back.
+let modelPickSequence = 0
+const latestModelPickBySession = new Map<string, number>()
+
 export function useModelControls({
   cacheOwnerConnectionId,
   cacheProfile,
@@ -319,6 +324,18 @@ export function useModelControls({
         return true
       }
 
+      // Snapshot what this pick painted: a newer pick on the same session or a
+      // primary session switch while config.set is in flight supersedes it,
+      // and its late failure must not repaint the pre-pick model.
+      const pickToken = ++modelPickSequence
+      latestModelPickBySession.set(liveSessionId, pickToken)
+      const paintedGeneration = getComposerSelectionGeneration()
+
+      const selectionSuperseded = () =>
+        latestModelPickBySession.get(liveSessionId) !== pickToken ||
+        (touchesPrimary &&
+          ($activeSessionId.get() !== liveSessionId || getComposerSelectionGeneration() !== paintedGeneration))
+
       // The PRIMARY profile's main agent lets the gateway decide persistence
       // (resolve_persist_behavior): session-only by default, persisted when
       // model.persist_switch_by_default is true or when no default has ever
@@ -360,6 +377,12 @@ export function useModelControls({
         const result = await requestSwitch()
 
         if (result?.confirm_required) {
+          // A newer pick already owns the pill; asking to confirm this one
+          // would only offer to undo it.
+          if (selectionSuperseded()) {
+            return false
+          }
+
           rollbackSelection()
           // ONE shared applier for guarded switches (#95293): the same
           // confirm flow the Bots editor routes through — never fork this
@@ -407,7 +430,10 @@ export function useModelControls({
           return true
         }
 
-        rollbackSelection()
+        if (!selectionSuperseded()) {
+          rollbackSelection()
+        }
+
         notifyError(err, copy.modelSwitchFailed)
 
         return false
