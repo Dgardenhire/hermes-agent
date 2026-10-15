@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -505,6 +506,44 @@ class TestRevoke:
         assert revoked is True
         with patch("gateway.pairing.PAIRING_DIR", tmp_path):
             assert store.is_approved("telegram", "user1") is False
+
+    def test_revoke_from_other_store_is_not_undone_by_inflight_approval(self, tmp_path):
+        """Dashboard requests and the ``hermes pairing`` CLI each build their own store, so
+        an approval that read approved.json before a revoke landed must not write it back."""
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path), \
+                patch("gateway.pairing._sync_allowlist_add"), patch("gateway.pairing._sync_allowlist_remove"):
+            seed = PairingStore()
+            seed._approve_user("telegram", "carol")
+            code = seed.generate_code("telegram", "alice", "Alice")
+            dashboard = PairingStore()
+            cli = PairingStore()
+        approved_path = dashboard._approved_path("telegram")
+        revoke_done = threading.Event()
+        revoke_result = []
+        real_load = dashboard._load_json
+
+        def revoke_in_other_process():
+            revoke_result.append(cli.revoke("telegram", "carol"))
+            revoke_done.set()
+
+        def load_then_let_revoke_run(path):
+            data = real_load(path)
+            if path == approved_path and not revoke_result and threading.current_thread().name == "dashboard":
+                threading.Thread(target=revoke_in_other_process, daemon=True).start()
+                # Unserialized stores let the revoke finish inside this window.
+                revoke_done.wait(2.0)
+            return data
+
+        dashboard._load_json = load_then_let_revoke_run
+        approver = threading.Thread(target=dashboard.approve_code, args=("telegram", code), name="dashboard")
+        approver.start()
+        approver.join(10)
+        assert revoke_done.wait(10)
+
+        final = json.loads(approved_path.read_text())
+        assert revoke_result == [True]
+        assert "alice" in final
+        assert "carol" not in final
 
 
 # ---------------------------------------------------------------------------
