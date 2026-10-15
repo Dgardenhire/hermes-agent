@@ -28,6 +28,7 @@ from tools.url_safety import is_safe_url
 from tools.url_safety import create_ssrf_safe_client
 from tools.website_policy import check_website_access
 from tools.skills_hub_models import _normalize_lock_install_path, _validate_skill_name
+from utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +290,9 @@ class _JsonStateFile:
 
     def _write(self, data: dict, **dumps_kwargs) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, indent=2, **dumps_kwargs) + "\n", encoding="utf-8")
+        # Temp + rename: another process (CLI vs desktop install) reading mid-write would see an
+        # empty file, load EMPTY and save a lock that drops every other installed skill.
+        atomic_write_text(self.path, json.dumps(data, indent=2, **dumps_kwargs) + "\n", preserve_mode=True)
 
 
 class HubLockFile(_JsonStateFile):
