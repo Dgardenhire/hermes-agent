@@ -267,3 +267,74 @@ class TestListBundles:
         info_list = list_bundles()
         slugs = [b["slug"] for b in info_list]
         assert slugs == sorted(slugs)
+
+
+class TestBundleCacheRaces:
+    """The gateway's cache must see edits another process (`hermes bundles`) makes in the same mtime tick."""
+
+    T = 1_800_000_000_000_000_000
+
+    def _pin(self, *paths):
+        for p in paths:
+            os.utime(p, ns=(self.T, self.T))
+
+    def test_same_tick_new_bundle_is_seen(self, bundles_env):
+        bundles_dir, _ = bundles_env
+        alpha = _make_bundle_yaml(bundles_dir, "alpha", ["x"])
+        self._pin(alpha, bundles_dir)
+        assert sorted(get_skill_bundles()) == ["/alpha"]
+
+        beta = _make_bundle_yaml(bundles_dir, "beta", ["y"])
+        self._pin(beta, bundles_dir)
+        assert sorted(get_skill_bundles()) == ["/alpha", "/beta"]
+
+    def test_same_tick_edit_is_seen(self, bundles_env):
+        bundles_dir, _ = bundles_env
+        alpha = _make_bundle_yaml(bundles_dir, "alpha", ["x"])
+        self._pin(alpha, bundles_dir)
+        assert get_skill_bundles()["/alpha"]["skills"] == ["x"]
+
+        _make_bundle_yaml(bundles_dir, "alpha", ["changed"])
+        self._pin(alpha)
+        assert get_skill_bundles()["/alpha"]["skills"] == ["changed"]
+
+    def test_write_landing_during_scan_is_picked_up_next_call(self, bundles_env, monkeypatch):
+        import agent.skill_bundles as mod
+
+        bundles_dir, _ = bundles_env
+        alpha = _make_bundle_yaml(bundles_dir, "alpha", ["x"])
+        self._pin(alpha, bundles_dir)
+        real_load = mod._load_bundle_file
+
+        def load_then_concurrent_write(path):
+            info = real_load(path)
+            # Another process finishes its write after this scan parsed the old content.
+            _make_bundle_yaml(bundles_dir, "alpha", ["after-parse"])
+            self._pin(alpha)
+            return info
+
+        monkeypatch.setattr(mod, "_load_bundle_file", load_then_concurrent_write)
+        assert get_skill_bundles()["/alpha"]["skills"] == ["x"]
+        monkeypatch.setattr(mod, "_load_bundle_file", real_load)
+
+        assert get_skill_bundles()["/alpha"]["skills"] == ["after-parse"]
+
+    def test_overwrite_never_exposes_a_partial_file(self, bundles_env, monkeypatch):
+        import agent.skill_bundles as mod
+        import utils
+
+        save_bundle("alpha", ["old-skill"])
+        target = mod.bundle_path_for("alpha")
+        real_replace = utils.atomic_replace
+        seen_mid_write = []
+
+        def replace_spy(tmp_path, dest):
+            # The new payload is fully written to a temp file; readers still see the old bundle whole.
+            seen_mid_write.append(mod._load_bundle_file(target)["skills"])
+            return real_replace(tmp_path, dest)
+
+        monkeypatch.setattr(utils, "atomic_replace", replace_spy)
+        save_bundle("alpha", ["new-skill"], overwrite=True)
+
+        assert seen_mid_write == [["old-skill"]]
+        assert get_bundle("alpha")["skills"] == ["new-skill"]
