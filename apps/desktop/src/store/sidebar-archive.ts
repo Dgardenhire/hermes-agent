@@ -1,5 +1,6 @@
 import { atom, computed } from 'nanostores'
 
+import { $apiRequestScope } from '@/api/client'
 import { listAllProfileSessions } from '@/api/sessions'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -53,20 +54,52 @@ export async function listEveryArchivedSession(): Promise<SessionInfo[]> {
 export const $archivedSessions = atom<SessionInfo[]>([])
 export const $archivedSessionsLoading = atom(false)
 
+// Each load takes a generation; only the newest may publish or clear the
+// flag. The scope key pins it to the connection/profile it was issued on, so
+// a switch mid-load starts a fresh fetch and strands the previous one.
+let archiveGeneration = 0
+let loadingScope: null | string = null
+let archivedScope: null | string = null
+
+function archiveScopeKey(): string {
+  const { connectionId, profile } = $apiRequestScope.get()
+
+  return `${connectionId ?? ''}::${profile ?? ''}`
+}
+
 export async function loadArchivedSessions(): Promise<void> {
-  if ($archivedSessionsLoading.get()) {
+  const scope = archiveScopeKey()
+
+  if ($archivedSessionsLoading.get() && loadingScope === scope) {
     return
   }
+
+  const generation = ++archiveGeneration
+  loadingScope = scope
+
+  // Rows from another connection must not linger (or be acted on) while the
+  // new one loads; the keep-last-good fallback below is per scope.
+  if (archivedScope !== null && archivedScope !== scope) {
+    $archivedSessions.set([])
+  }
+
+  archivedScope = scope
 
   $archivedSessionsLoading.set(true)
 
   try {
-    $archivedSessions.set(await listEveryArchivedSession())
+    const sessions = await listEveryArchivedSession()
+
+    if (generation === archiveGeneration && archiveScopeKey() === scope) {
+      $archivedSessions.set(sessions)
+    }
   } catch {
     // A background refresh must not turn a usable Archived view into an empty
     // one when the backend is temporarily unavailable. Keep the last good set.
   } finally {
-    $archivedSessionsLoading.set(false)
+    if (generation === archiveGeneration) {
+      $archivedSessionsLoading.set(false)
+    }
   }
 }
 
