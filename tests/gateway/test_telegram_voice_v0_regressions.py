@@ -277,3 +277,37 @@ def _voice_event(source, urls):
     )
 
 
+
+
+@pytest.mark.asyncio
+async def test_voice_note_merged_during_pending_stt_is_transcribed():
+    """A 2nd voice note merged into the pending event while the interrupt monitor's STT is in
+    flight must not be dropped by the monitor publishing a transcript of the 1st note only."""
+    from gateway.platforms.base import merge_pending_message_event
+
+    runner = _runner()
+    source = _source()
+    stt_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_enrich(text, paths):
+        stt_started.set()
+        await release.wait()
+        transcripts = [f"<{Path(p).name}>" for p in paths]
+        return text + " ".join(transcripts), transcripts
+
+    runner._enrich_message_with_transcription = fake_enrich
+    pending = {}
+    merge_pending_message_event(pending, "k", _voice_event(source, ["/tmp/A.ogg"]))
+    event = pending["k"]
+
+    monitor = asyncio.create_task(runner._transcribe_pending_audio_event_once(event, ""))
+    await stt_started.wait()
+    merge_pending_message_event(pending, "k", _voice_event(source, ["/tmp/B.ogg"]))
+    release.set()
+    await monitor
+
+    drain_text, drain_transcripts = await runner._transcribe_pending_audio_event_once(event, "")
+
+    assert drain_transcripts == ["<A.ogg>", "<B.ogg>"]
+    assert "<B.ogg>" in drain_text

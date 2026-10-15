@@ -1902,6 +1902,12 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayPluginInjectionMixin)
             return user_text if user_text is not None else (getattr(event, "text", None) or None), []
         text = user_text if user_text is not None else (getattr(event, "text", "") or "")
         enriched_text, successful_transcripts = await self._enrich_message_with_transcription(text, audio_paths)
+        # A voice note merged in during the await dropped a cache that did not exist yet; re-run on
+        # the merged media rather than publish a transcript that silently omits the new note.
+        while self._pending_event_audio_paths(event) != audio_paths:
+            audio_paths = self._pending_event_audio_paths(event)
+            text = user_text if user_text is not None else (getattr(event, "text", "") or "")
+            enriched_text, successful_transcripts = await self._enrich_message_with_transcription(text, audio_paths)
         event._gateway_pending_stt_text = enriched_text
         event._gateway_pending_stt_transcripts = list(successful_transcripts)
         return enriched_text, successful_transcripts
