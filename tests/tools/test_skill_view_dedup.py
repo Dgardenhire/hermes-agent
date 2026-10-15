@@ -1,6 +1,7 @@
 """Tests for skill_view repeat-view dedup (unchanged-skill stub)."""
 
 import json
+import os
 import time
 
 import pytest
@@ -9,6 +10,13 @@ from tools.skills_tool import (
     _skill_view_with_bump,
     reset_skill_view_dedup,
 )
+
+_SETTLED_NS = time.time_ns() - 3600 * 1_000_000_000
+
+
+def _pin_mtime(path, ns):
+    os.utime(path, ns=(ns, ns))
+
 
 @pytest.fixture
 def skills_home(tmp_path, monkeypatch):
@@ -24,6 +32,9 @@ def skills_home(tmp_path, monkeypatch):
     refs = d / "references"
     refs.mkdir()
     (refs / "guide.md").write_text("# Guide\n\nDetailed reference content here.\n", encoding="utf-8")
+    # Settle the files outside the racy-mtime window so a repeat view is dedup-eligible.
+    for f in (d / "SKILL.md", refs / "guide.md"):
+        _pin_mtime(f, _SETTLED_NS)
     monkeypatch.setenv("HERMES_HOME", str(home))
     reset_skill_view_dedup()
     from tools.skill_manager_guards import _reset_background_review_read_marks
@@ -125,3 +136,50 @@ class TestSkillViewDedup:
         repeat = _view("demo-dedup-skill")
         assert repeat.get("dedup") is True
         assert repeat.get("content_returned") is False
+
+
+class TestSkillViewDedupRaces:
+    """A repeat view must never claim 'unchanged' for content the model was not served."""
+
+    def _md(self, skills_home):
+        return skills_home / "skills" / "demo-dedup-skill" / "SKILL.md"
+
+    def test_write_while_serving_is_not_deduped(self, skills_home, monkeypatch):
+        import tools.skills_tool as st
+
+        md = self._md(skills_home)
+        real = st._log_security_warnings
+
+        def write_after_read(*args, **kwargs):
+            # A background-review skill_manage patch lands after skill_view read v1.
+            md.write_text(md.read_text(encoding="utf-8").replace("Step one", "Step NEW!"), encoding="utf-8")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(st, "_log_security_warnings", write_after_read)
+        first = _view("demo-dedup-skill")
+        assert "Step one" in first["content"]
+        monkeypatch.setattr(st, "_log_security_warnings", real)
+
+        again = _view("demo-dedup-skill")
+        assert again.get("dedup") is None
+        assert "Step NEW!" in again.get("content", "")
+
+    def test_same_size_rewrite_with_pinned_mtime_is_not_deduped(self, skills_home):
+        md = self._md(skills_home)
+        _view("demo-dedup-skill")
+        md.write_text(md.read_text(encoding="utf-8").replace("Step one", "Step 111"), encoding="utf-8")
+        _pin_mtime(md, _SETTLED_NS)
+
+        again = _view("demo-dedup-skill")
+        assert again.get("dedup") is None
+        assert "Step 111" in again.get("content", "")
+
+    def test_racily_fresh_file_is_not_recorded(self, skills_home):
+        md = self._md(skills_home)
+        # Just written: a same-tick rewrite after the read would leave mtime/size/ino/ctime equal.
+        md.write_text(md.read_text(encoding="utf-8"), encoding="utf-8")
+        _view("demo-dedup-skill")
+
+        again = _view("demo-dedup-skill")
+        assert again.get("dedup") is None
+        assert "Step one" in again.get("content", "")

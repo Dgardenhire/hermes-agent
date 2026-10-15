@@ -9,6 +9,8 @@ so the next repeat must serve content again, as after compaction (#32106).
 from __future__ import annotations
 
 import json
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +32,8 @@ def served(tmp_path, monkeypatch):
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: demo-skill\ndescription: Demo.\n---\n# demo-skill\n\nDo the demo steps.\n", encoding="utf-8")
+    settled = time.time_ns() - 3600 * 1_000_000_000  # outside the racy-mtime window, so dedup-eligible
+    os.utime(skill_dir / "SKILL.md", ns=(settled, settled))
     monkeypatch.setenv("HERMES_HOME", str(home))
     reset_skill_view_dedup()
     call = {"id": "call_skill", "type": "function",

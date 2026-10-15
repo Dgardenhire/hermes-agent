@@ -1,5 +1,5 @@
 """skill_view repeat-view dedup registry: per-task cache of (skill name, file_path) ->
-(skill file mtime+size). A repeat view of an UNCHANGED file returns a short stub — the earlier
+(skill file signature). A repeat view of an UNCHANGED file returns a short stub — the earlier
 tool result already carries the content verbatim. Cleared via ``reset_skill_view_dedup()`` on
 context compression AND on a committed proactive tool-result prune, because both replace the
 original content with a one-line marker.
@@ -9,6 +9,8 @@ import json
 import os
 import threading
 from typing import Dict
+
+from utils import file_signature, mtime_is_racy
 
 _skill_view_tracker: dict[str, dict[tuple, tuple]] = {}
 _skill_view_tracker_lock = threading.Lock()
@@ -21,15 +23,31 @@ _SKILL_VIEW_DEDUP_MESSAGE = (
     "returns the full content again.)")
 
 
+def skill_view_source_sig(path) -> list | None:
+    """Signature of a skill file taken BEFORE it is read; skill_view returns it as ``_source_sig``."""
+    try:
+        return list(file_signature(os.stat(path)))
+    except OSError:
+        return None
+
+
 def _skill_view_fingerprint(payload: dict) -> tuple | None:
     """Stat the skill file a successful skill_view served, for change detection."""
-    if not (src := payload.get("_source_path")):
+    if not (src := payload.get("_source_path")) or not (pre := payload.get("_source_sig")):
         return None
     try:
         st = os.stat(src)
-        return (src, st.st_mtime_ns, st.st_size)
     except OSError:
         return None
+    sig = file_signature(st)
+    # Rewritten while being served (background-review patch, curator, another session): the
+    # served text matches neither signature, so recording either would stub stale content.
+    if list(sig) != list(pre):
+        return None
+    # A same-size rewrite in the tick of the read keeps the signature: don't record a racily clean view.
+    if mtime_is_racy(st.st_mtime_ns):
+        return None
+    return (src, sig)
 
 
 def _record_skill_view(task_id, name, file_path, payload: dict) -> None:
@@ -60,7 +78,7 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
             return None
         # Record key is the RESOLVED name; match raw and resolved forms so
         # 'category/skill' and bare-name views coalesce.
-        for key, (src, mtime_ns, size) in list(cache.items()):
+        for key, (src, sig) in list(cache.items()):
             rec_name, rec_fp = key
             if rec_fp != (file_path or "") or (
                     rec_name != n and not n.endswith("/" + rec_name)
@@ -68,7 +86,7 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
                 continue
             try:
                 st = os.stat(src)
-                changed = (st.st_mtime_ns, st.st_size) != (mtime_ns, size)
+                changed = file_signature(st) != sig
             except OSError:
                 changed = True
             if changed:

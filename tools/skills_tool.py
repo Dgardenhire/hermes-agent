@@ -26,7 +26,7 @@ from tools.skills_tool_plugin import (
     _mark_background_review_read, _preprocess_skill, _read_skill_text, _safe_frontmatter,
     _serve_plugin_skill, _serve_skill_file, _truncate_description)
 from tools.skills_tool_dedup import (
-    _check_skill_view_dedup, _record_skill_view, reset_skill_view_dedup)
+    _check_skill_view_dedup, _record_skill_view, reset_skill_view_dedup, skill_view_source_sig)
 from tools.skill_provenance import is_background_review
 
 logger = logging.getLogger(__name__)
@@ -593,6 +593,7 @@ def skill_view(
         error, skill_dir, skill_md = _locate_skill(name, local_category_name, roots)
         if error is not None:
             return error
+        source_sig = skill_view_source_sig(skill_md)  # before the read: dedup must not fingerprint a later write
         try:  # read once — reused for platform check and main content
             content = _read_skill_text(skill_md)
         except Exception as e:
@@ -662,6 +663,7 @@ def skill_view(
             **readiness,
             # Internal: absolute source path for the repeat-view dedup fingerprint.
             "_source_path": str(skill_md),
+            "_source_sig": source_sig,
             **readiness_extras}
         if deps_note:
             result["deps_note"] = deps_note

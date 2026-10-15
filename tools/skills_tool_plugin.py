@@ -8,6 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List
 
+from tools.skills_tool_dedup import skill_view_source_sig
 from tools.skills_tool_setup import SkillReadinessStatus
 
 logger = logging.getLogger("tools.skills_tool")
@@ -85,6 +86,7 @@ def _serve_skill_file(
             "available_files": _available_skill_files(skill_root),
             "hint": "Use one of the available file paths listed above"}
         return _fail(f"File '{file_path}' not found in skill '{label}'.", **listing)
+    source_sig = skill_view_source_sig(target)  # before the read: dedup must not fingerprint a later write
     try:
         content = _read_skill_text(target)
     except UnicodeDecodeError:
@@ -99,7 +101,7 @@ def _serve_skill_file(
         _mark_background_review_read(target)
     return _json({  # _source_path: internal, feeds the repeat-view dedup fingerprint
         "success": True, "name": label, "file": file_path, "content": content,
-        "file_type": target.suffix, "_source_path": str(target)})
+        "file_type": target.suffix, "_source_path": str(target), "_source_sig": source_sig})
 
 
 def _mark_background_review_read(path: Path) -> None:
@@ -129,6 +131,7 @@ def _serve_plugin_skill(
     if namespace in _get_disabled_plugins():
         return _fail(f"Plugin '{namespace}' is disabled. Re-enable with: hermes plugins enable {namespace}")
     qualified_name = f"{namespace}:{bare}"
+    source_sig = skill_view_source_sig(skill_md)  # before the read: dedup must not fingerprint a later write
     try:
         content = _read_skill_text(skill_md)
     except Exception as e:
@@ -158,7 +161,7 @@ def _serve_plugin_skill(
         "description": _truncate_description(str(parsed_frontmatter.get("description", ""))),
         "linked_files": _plugin_skill_linked_files(skill_md.parent),
         "readiness_status": SkillReadinessStatus.AVAILABLE.value,
-        "skill_dir": str(skill_md.parent), "_source_path": str(skill_md)})
+        "skill_dir": str(skill_md.parent), "_source_path": str(skill_md), "_source_sig": source_sig})
 
 
 def _plugin_skill_linked_files(skill_root: Path) -> dict[str, list[str]] | None:

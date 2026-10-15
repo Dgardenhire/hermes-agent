@@ -18,6 +18,8 @@ These tests drive ``run_conversation()`` through real tool iterations and pin:
 from __future__ import annotations
 
 import json
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -292,12 +294,15 @@ class TestCommittedPruneIsDedupBoundary:
     @staticmethod
     def _seed_dedup(tmp_path, task_id):
         from tools.file_tools_read_tracking import _read_tracker, _read_tracker_lock, _task_data
-        from tools.skills_tool_dedup import _record_skill_view, reset_skill_view_dedup
+        from tools.skills_tool_dedup import _record_skill_view, reset_skill_view_dedup, skill_view_source_sig
 
         skill_md = tmp_path / "SKILL.md"
         skill_md.write_text("# s\n", encoding="utf-8")
+        settled = time.time_ns() - 3600 * 1_000_000_000  # outside the racy-mtime window
+        os.utime(skill_md, ns=(settled, settled))
         reset_skill_view_dedup(task_id)
-        _record_skill_view(task_id, "bigskill", None, {"name": "bigskill", "_source_path": str(skill_md)})
+        _record_skill_view(task_id, "bigskill", None, {
+            "name": "bigskill", "_source_path": str(skill_md), "_source_sig": skill_view_source_sig(skill_md)})
         with _read_tracker_lock:
             _read_tracker.pop(task_id, None)
             td = _task_data(task_id)
